@@ -1,0 +1,27 @@
+{
+  "name": "m4a-ogg-to-mp3-web",
+  "version": "1.0.0",
+  "description": "Web app local para converter M4A e OGG para MP3 em alta qualidade",
+  "main": "server.js",
+  "scripts": {
+    "start": "node scripts/start-clean.js",
+    "start:raw": "node server.js",
+    "start:clean": "node scripts/start-clean.js"
+  },
+  "keywords": [
+    "audio",
+    "converter",
+    "m4a",
+    "ogg",
+    "mp3",
+    "ffmpeg"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^4.21.2",
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0",
+    "multer": "^2.0.2"
+  }
+}

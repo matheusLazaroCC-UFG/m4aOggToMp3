@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Conversor M4A/OGG para MP3</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="shape shape-a"></div>
+    <div class="shape shape-b"></div>
+
+    <main class="card">
+      <p class="badge">LOCALHOST:9090</p>
+      <h1>M4A/OGG para MP3</h1>
+      <p class="description">
+        No formato MP3, 320 kbps e o limite tecnico de bitrate. Voce pode escolher a qualidade, taxa de
+        amostragem, canais e metadados. A exportacao e sempre em um arquivo ZIP com todos os .mp3 convertidos.
+      </p>
+
+      <form id="convertForm">
+        <label class="file-picker" for="audioFiles">Selecionar arquivos .m4a ou .ogg</label>
+        <input id="audioFiles" name="audioFiles" type="file" accept=".m4a,.ogg" multiple required />
+
+        <div class="options-grid">
+          <label class="field-group" for="qualityPreset">
+            <span>Qualidade MP3</span>
+            <select id="qualityPreset" name="qualityPreset">
+              <option value="cbr-320" selected>CBR 320 kbps (taxa fixa, maximo no MP3)</option>
+              <option value="vbr-v0">VBR V0 (qualidade maxima variavel)</option>
+              <option value="cbr-256">CBR 256 kbps (taxa fixa)</option>
+              <option value="cbr-192">CBR 192 kbps (taxa fixa)</option>
+            </select>
+          </label>
+
+          <label class="field-group" for="sampleRate">
+            <span>Taxa de amostragem</span>
+            <select id="sampleRate" name="sampleRate">
+              <option value="48000" selected>48.000 Hz</option>
+              <option value="44100">44.100 Hz</option>
+              <option value="source">Manter do arquivo original</option>
+            </select>
+          </label>
+
+          <label class="field-group" for="channels">
+            <span>Canais</span>
+            <select id="channels" name="channels">
+              <option value="2" selected>2 (estereo)</option>
+              <option value="1">1 (mono)</option>
+              <option value="source">Manter do arquivo original</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="checkbox-option" for="preserveMetadata">
+          <input id="preserveMetadata" name="preserveMetadata" type="checkbox" checked />
+          <span>Preservar metadados ID3 (artista, album, ano)</span>
+        </label>
+
+        <p class="helper-note">Dica: selecione CBR 320 kbps para tentar manter bitrate fixo visivel em propriedades.</p>
+
+        <p id="selectedFiles" class="selected-files">Nenhum arquivo selecionado.</p>
+
+        <button id="convertButton" type="submit">Converter agora</button>
+      </form>
+
+      <section id="progressPanel" class="progress-panel" hidden>
+        <div class="overall-progress-head">
+          <span>Progresso total</span>
+          <strong id="overallPercent">0%</strong>
+        </div>
+        <div class="overall-progress-track" aria-hidden="true">
+          <div id="overallBar" class="overall-progress-fill"></div>
+        </div>
+
+        <ul id="fileProgressList" class="file-progress-list"></ul>
+      </section>
+
+      <p id="status" class="status" aria-live="polite"></p>
+    </main>
+
+    <script>
+      const form = document.getElementById("convertForm");
+      const fileInput = document.getElementById("audioFiles");
+      const selectedFiles = document.getElementById("selectedFiles");
+      const statusElement = document.getElementById("status");
+      const button = document.getElementById("convertButton");
+      const progressPanel = document.getElementById("progressPanel");
+      const overallPercentElement = document.getElementById("overallPercent");
+      const overallBarElement = document.getElementById("overallBar");
+      const fileProgressList = document.getElementById("fileProgressList");
+      const qualityPresetSelect = document.getElementById("qualityPreset");
+      const sampleRateSelect = document.getElementById("sampleRate");
+      const channelsSelect = document.getElementById("channels");
+      const preserveMetadataCheckbox = document.getElementById("preserveMetadata");
+
+      let activeEventSource = null;
+
+      function parseFileName(contentDisposition) {
+        if (!contentDisposition) {
+          return null;
+        }
+
+        const utf8Match = contentDisposition.match(/filename\\*=UTF-8''([^;]+)/i);
+        if (utf8Match && utf8Match[1]) {
+          return decodeURIComponent(utf8Match[1]);
+        }
+
+        const basicMatch = contentDisposition.match(/filename=\"?([^\";]+)\"?/i);
+        return basicMatch && basicMatch[1] ? basicMatch[1] : null;
+      }
+
+      function generateJobId() {
+        if (window.crypto && typeof window.crypto.randomUUID === "function") {
+          return window.crypto.randomUUID();
+        }
+
+        if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+          const bytes = new Uint8Array(16);
+          window.crypto.getRandomValues(bytes);
+
+          bytes[6] = (bytes[6] & 0x0f) | 0x40;
+          bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+          const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+          return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+        }
+
+        const randomPart = Math.random().toString(36).slice(2, 12);
+        return `job-${Date.now()}-${randomPart}`;
+      }
+
+      function closeProgressStream() {
+        if (!activeEventSource) {
+          return;
+        }
+
+        activeEventSource.close();
+        activeEventSource = null;
+      }
+
+      function updateOverallPercent(percent) {
+        const normalizedPercent = Math.max(0, Math.min(100, Math.round(percent)));
+        overallPercentElement.textContent = `${normalizedPercent}%`;
+        overallBarElement.style.width = `${normalizedPercent}%`;
+      }
+
+      function createFileProgressItem(fileName, index) {
+        const item = document.createElement("li");
+        item.className = "file-progress-item";
+        item.dataset.index = String(index);
+
+        const head = document.createElement("div");
+        head.className = "file-progress-head";
+
+        const name = document.createElement("span");
+        name.className = "file-progress-name";
+        name.textContent = fileName;
+
+        const percent = document.createElement("span");
+        percent.className = "file-progress-percent";
+        percent.textContent = "0%";
+
+        const track = document.createElement("div");
+        track.className = "file-progress-track";
+
+        const fill = document.createElement("div");
+        fill.className = "file-progress-fill";
+        track.appendChild(fill);
+
+        const state = document.createElement("p");
+        state.className = "file-progress-state";
+        state.textContent = "Aguardando";
+
+        head.appendChild(name);
+        head.appendChild(percent);
+        item.appendChild(head);
+        item.appendChild(track);
+        item.appendChild(state);
+        return item;
+      }
+
+      function resetProgressUI(files) {
+        progressPanel.hidden = false;
+        updateOverallPercent(0);
+        fileProgressList.innerHTML = "";
+
+        files.forEach((file, index) => {
+          fileProgressList.appendChild(createFileProgressItem(file.name, index + 1));
+        });
+      }
+
+      function fileStatusLabel(status) {
+        if (status === "processing") {
+          return "Convertendo";
+        }
+        if (status === "done") {
+          return "Concluido";
+        }
+        if (status === "error") {
+          return "Erro";
+        }
+        return "Aguardando";
+      }
+
+      function summarizeSelectedFiles(files) {
+        if (!files.length) {
+          return "Nenhum arquivo selecionado.";
+        }
+
+        if (files.length <= 3) {
+          return files.map((file) => file.name).join(", ");
+        }
+
+        const preview = files.slice(0, 3).map((file) => file.name).join(", ");
+        return `${files.length} arquivos selecionados: ${preview} ...`;
+      }
+
+      function applyProgressPayload(payload) {
+        if (typeof payload.overallPercent === "number") {
+          updateOverallPercent(payload.overallPercent);
+        }
+
+        if (Array.isArray(payload.files)) {
+          payload.files.forEach((fileUpdate) => {
+            const row = fileProgressList.querySelector(`[data-index="${fileUpdate.index}"]`);
+            if (!row) {
+              return;
+            }
+
+            const percentElement = row.querySelector(".file-progress-percent");
+            const fillElement = row.querySelector(".file-progress-fill");
+            const stateElement = row.querySelector(".file-progress-state");
+            const normalizedPercent = Math.max(0, Math.min(100, Math.round(fileUpdate.percent || 0)));
+
+            percentElement.textContent = `${normalizedPercent}%`;
+            fillElement.style.width = `${normalizedPercent}%`;
+            stateElement.textContent = fileStatusLabel(fileUpdate.status);
+
+            row.classList.toggle("is-done", fileUpdate.status === "done");
+            row.classList.toggle("is-error", fileUpdate.status === "error");
+          });
+        }
+
+        if (payload.message) {
+          statusElement.textContent = payload.message;
+        }
+      }
+
+      function openProgressStream(jobId) {
+        closeProgressStream();
+
+        if (typeof window.EventSource !== "function") {
+          statusElement.textContent = "Seu navegador nao suporta atualizacao em tempo real para progresso.";
+          return;
+        }
+
+        const eventSource = new EventSource(`/progress/${encodeURIComponent(jobId)}`);
+        activeEventSource = eventSource;
+
+        eventSource.onmessage = (event) => {
+          let payload;
+
+          try {
+            payload = JSON.parse(event.data);
+          } catch {
+            return;
+          }
+
+          if (!payload || payload.jobId !== jobId) {
+            return;
+          }
+
+          applyProgressPayload(payload);
+
+          if (payload.stage === "done") {
+            statusElement.textContent = "Conversao finalizada. Download do ZIP iniciado.";
+            closeProgressStream();
+          }
+
+          if (payload.stage === "error") {
+            statusElement.textContent = payload.error || payload.message || "Falha durante a conversao.";
+            closeProgressStream();
+          }
+        };
+
+        eventSource.onerror = () => {
+          if (eventSource.readyState === EventSource.CLOSED) {
+            closeProgressStream();
+          }
+        };
+      }
+
+      fileInput.addEventListener("change", () => {
+        if (!fileInput.files.length) {
+          selectedFiles.textContent = "Nenhum arquivo selecionado.";
+          progressPanel.hidden = true;
+          fileProgressList.innerHTML = "";
+          updateOverallPercent(0);
+          return;
+        }
+
+        selectedFiles.textContent = summarizeSelectedFiles(Array.from(fileInput.files));
+      });
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+
+        if (!fileInput.files.length) {
+          statusElement.textContent = "Selecione pelo menos um arquivo.";
+          return;
+        }
+
+        const files = Array.from(fileInput.files);
+        const jobId = generateJobId();
+        const selectedQualityText = qualityPresetSelect.options[qualityPresetSelect.selectedIndex]?.text || "qualidade selecionada";
+
+        button.disabled = true;
+        statusElement.textContent = `Upload enviado. Iniciando conversao em ${selectedQualityText}...`;
+
+        resetProgressUI(files);
+        openProgressStream(jobId);
+
+        const body = new FormData();
+        body.append("jobId", jobId);
+        body.append("qualityPreset", qualityPresetSelect.value);
+        body.append("sampleRate", sampleRateSelect.value);
+        body.append("channels", channelsSelect.value);
+        body.append("preserveMetadata", preserveMetadataCheckbox.checked ? "1" : "0");
+        files.forEach((file) => body.append("audioFiles", file));
+
+        try {
+          const response = await fetch("/convert", {
+            method: "POST",
+            body,
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(errorText || "Erro ao converter arquivos.");
+          }
+
+          const blob = await response.blob();
+          const contentDisposition = response.headers.get("Content-Disposition");
+          const outputName = parseFileName(contentDisposition) || "audios-convertidos-mp3.zip";
+
+          const downloadUrl = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = downloadUrl;
+          link.download = outputName;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(downloadUrl);
+
+          statusElement.textContent = "Conversao finalizada. Download do ZIP iniciado.";
+          updateOverallPercent(100);
+        } catch (error) {
+          statusElement.textContent = error.message || "Falha inesperada.";
+        } finally {
+          button.disabled = false;
+          closeProgressStream();
+        }
+      });
+    </script>
+  </body>
+</html>
